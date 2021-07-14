@@ -1,0 +1,92 @@
+#!/bin/bash
+# nc_htmlserver
+# ein Miniwebserver
+# nimmt alles aus dem HTMLInputfile und bastelt ein HTML-Dokument
+# daraus und pipt es an den angegebenen Port. Das macht es immer
+# weiter, solange bis netcat abstuerzt oder gekillt wird ...
+# Da der Neuafbau der HTML-Datei immer erst nach Abruf der alten
+# HTML-Datei passiert ist immer die zum Zeitpunkt des Dateiaufbaus
+# aktuellste Version abrufbar. Im Zweifelsfall habe ich einen
+# refresh von 1 sek eingebaut. Der muss evtl. im Browser
+# erlaubt werden...
+# Ist der Port bereits mit einem Dokument belegt, scheitert das
+# bereitstellen solange, bis es abgeholt wurde.
+# gemacht wird das alles als here-Document. Die Webseite
+# wird on the fly aus diesem Script generiert...
+
+# keine Logdatei angegeben
+# nimm den Standard
+HTMLInputfile=$1
+if [ "${HTMLInputfile}" = "" ]
+  then
+  HTMLInputfile=`locate nc_service.log`
+  fi
+
+# hole das temporaere Verzeichnis aud dem Logdateinamen
+Dirtmp=`dirname "${HTMLInputfile}"`
+
+# Name der HTML-Datei festlegen
+HTMLStream="${Dirtmp}"/nc_stream.html
+
+# kein Port vorhanden
+# dann nehme 8080 als Standard
+Portadresse=$2
+if [ "${Portadresse}" = "" ]
+  then
+  Portadresse=8080
+  fi
+  
+#read IPAdresse < "${StreamIPDateiname}"
+IPAdresse=`ip addr | grep 'state UP' -A2 | tail -n1 | awk '{print $2}' | cut -f1 -d'/'`
+
+echo "Webservice erreichbar mit http://${IPAdresse}:${Portadresse}" >> "${HTMLInputfile}"
+rm "${StreamIPDateiname}"
+# Ausstiegsbedingung fuer die Schleife initialisiseren
+exitbed=1
+
+while [ $exitbed -eq 1 ]; # Schleife laeuft bis exitbed nicht eins
+  do 
+  # Als erstes wird die Antwort des Webservers auf den Abruf per Browser generiert
+  # und in den netcatstream geschrieben
+  echo -ne "HTTP/1.0 200 OK\r\n\r\n" > "${HTMLStream}"
+  
+  # ab hier genereieren wir die eigentliche HTML-Datei
+  # als erstes die Header (jede Sekunde einen Refresh...)
+  # viewport sorgt auch auf Handy fuer eine lesbare Darstellung
+  cat >> "${HTMLStream}" <<EOF1
+    <!doctype html>
+    <html>
+       <head>
+          <meta http-equiv="refresh" content="1; URL=http://${IPAdresse}:${Portadresse}">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>"${HTMLInputfile}" von "${IPAdresse}"</TITLE>
+       </head>
+       <body>
+         <pre>
+EOF1
+
+  # jetzt der eigentliche Nutzinhalt und zwar die 
+  # Logdatei in umgekehrter Reihenfolge (das neuste immer oben)
+  tac "${HTMLInputfile}" >>"${HTMLStream}"
+
+  # und hier die Reste fuer ein valides HTML :-)
+  cat >> "${HTMLStream}" <<EOF2
+         </pre>
+       </body>
+    </html>
+EOF2
+
+  # jetzt den generierten Stream abrufbar machen
+  nc -l "${IPAdresse}" "${Portadresse}" <"${HTMLStream}"
+  if [ $? -eq 0 ]
+    then
+    exitbed=1 # wenn nc regulaer beendet wurde naechste log holen
+    else
+    exitbed=0 # wenn nc abgestuerzt, dann raus aus der Schleife
+    fi
+
+  # generierter Stream wird nicht mehr gebraucht also loeschen
+#  rm "${HTMLStream}" >/dev/null
+
+done 
+echo `date` "HTMLServer beendet ..." >> "${HTMLInputfile}"
