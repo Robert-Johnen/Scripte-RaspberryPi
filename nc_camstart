@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# keine Verzeichnis
+Logdatei=$1
+if [ "${Logdatei}" = "" ]
+  then
+  Logdatei=`locate nc_service.log`
+  fi
+
+Portnummer=$2
+if [ "${Portnummer}" = "" ]
+  then
+  Portnummer=8082
+  fi
+
+IPAddresse=$3
+if [ "${IPAddresse}" ="" ]
+  then
+  IPAddresse="192.168.2.80"
+  fi
+
+# hole das Verzeichnis aus dem Pfad der Logdatei
+# Dirtmp=`dirname "${Logdatei}"`
+
+# StreamIPDateiname=$3
+# if [ "${StreamIPDateiname}" = "" ]
+#  then
+#  StreamIPDateiname="${Dirtmp}"/nc_videoip
+#  fi
+
+# Warte bis die Datei nc_ip im Verzeichnis $Dirtmp erstellt wird
+# echo "Warte auf IP um Videostream zu initialisieren" >> "${Logdatei}"
+# until [ -e "${StreamIPDateiname}" ]; do
+#  sleep 1
+#  done
+
+# Lies die daten aus nc_ip aus und versuche damit einen Videostream zu starten
+# Die Datei soll aus einer Zeile bestehen, in welcher IP und Portnummer durch
+# ein Leerzeichen getrennt stehen.
+
+# echo "Lese IP aus ${StreamIPDateiname}" >> "${Logdatei}"
+# IPAddresse = `cat "${StreamIPDateiname}"`
+
+raspivid -o - -t 0 -w 1920 -h 1080 -fps 25 -b 5000000 | nc "${IPAddresse}" "${Portnummer}" &
+echo "Videostream gestartet ${IPAdresse}" "${Portnummer}" >> "${Logdatei}"
+#rm "${StreamIPDateiname}"
