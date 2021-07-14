@@ -1,5 +1,5 @@
 # Scripte-RaspberryPi
-Ein Projekt, zur Steuerung eines ehemaligen Bombenräumpanzers
+Ein Projekt zur Steuerung eines ehemaligen Bombenräumpanzers
 mit diversen Funktionen über einen Raspberry Pi.
 Die Daten zur Steuerung der Komponenten wurden über eine in 
 C# für Laptop und Smartphone erstellte Netzwerkschnittstelle
