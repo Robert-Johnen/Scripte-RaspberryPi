@@ -1,0 +1,397 @@
+#!/usr/bin/python
+
+import logging, socket, os, subprocess, sys, RPi.GPIO as GPIO #,  time, string
+
+#----------------------Variablendeklaration Anfang----------------------
+########################################################################
+########################################################################
+########################################################################
+try: # Pfad zur Logdatei
+  pfadname = sys.argv[1]
+except:
+  pfadname = '/var/tmp/nc_tmp'
+
+try: # Logdateiname
+  logdateiname = pfadname+'/'+sys.argv[2]
+except:
+  logdateiname = pfadname+'/nc_service.log'
+
+try: # TCP-Port an dem auf Eingaben gelauscht wird.
+  listenport = int(sys.argv[3]) 
+except:
+  listenport = 10000
+
+#try: # Port fuer die Uebertragung der Videodaten
+#  videoport=int(sys.argv[4])
+#except:
+#  videoport = 8082
+
+#try: # Port fuer die Ausgabe des Logfiles
+#  htmlport=int(sys.argv[5])
+#except:
+#  htmlport = 8080
+
+listenpuffer = 64           # Groesse des Puffers / je kleiner, desto flotter die Reaktion am besten 1024
+#videoipdateiname = pfadname+'/nc_videoip'
+#htmlipdateiname = pfadname+'/nc_htmlip'
+logdateilevel = logging.DEBUG # Standardlevel Logging in Logdatei
+logging.basicConfig(filename=logdateiname,format='%(asctime)s %(message)s',filemode='a+',level=logdateilevel)
+
+pin = 0                     # GPIO Pin nach BCM
+wert = 0                    # Wert, der auf den Pin geschrieben wird
+pinstr = 0                  # Indexstring fuer die Suche im kanaldict(ionary)
+pin2str = 0                 # Indexstring fuer Schaltung in Gegenrichtung wenn benoetigt
+weiter = 1                  # Variable fuer Abbruchbedingung while-Schleifen
+schreibschutz = 0           # Schreibschutz
+netzwerkverbindung = 0      # Verbindung zu Netzwerksocket aus
+partnerip = "0.0.0.0"       # fuer IP des  verbundenen Rechners
+partnerport = 0             # fuer Port des verbundenen Rechners
+listenip = "0.0.0.0"        # lausche auf Netzwerkinterface (0.0.0.0=alle)
+
+# +++++++++++++++++++++++ Pinbelegung festlegen +++++++++++++++++++++++++
+kanaldict={
+# Index : { "nr":Kanal, "init":Initialwert, "wert":jetziger Wert, "io":Ein- oder Ausgang, "pwm": PWM-Frequenz }
+# linke Kette
+"lkrpwm"  : {"nr":17, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 2500},   # linke Kette rechtslauf
+"lklpwm"  : {"nr":27, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 2500},   # linke Kette linkslauf
+# rechte Kette
+"rkrpwm"  : {"nr":10, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 2500},   # rechte Kette rechtslauf
+"rklpwm"  : {"nr": 9, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 2500},   # rechte Kette linkslauf
+# Aktuatoren
+"akt1l"   : {"nr":11, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Aktuator 1 links
+"akt2l"   : {"nr": 6, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Aktuator 2 links 
+"akt3l"   : {"nr":19, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Aktuator 3 links
+"akt1r"   : {"nr": 5, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Aktuator 1 rechts
+"akt2r"   : {"nr":13, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Aktuator 2 rechts
+"akt3r"   : {"nr":26, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Aktuator 3 rechts
+# Kamerawender
+"caml"    : {"nr":14, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Blickrichtung links
+"camr"    : {"nr":15, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Blickrichtung rechts
+# Lampe
+"lampe"   : {"nr":18, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Lanmpe an/aus
+# Zusatzfunktionen
+"div1"    : {"nr":23, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # ZF 1
+"div2"    : {"nr":24, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # ZF 2
+"div3"    : {"nr":25, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # ZF 3
+# Notausfunktion
+"emoff"   : {"nr": 8, "init": 1, "wert": 1, "io": GPIO.IN , "pwm": 0},   # Notaus angezogen
+# Motorbremse
+"brl"     : {"nr": 7, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0},   # Bremse linke Kette
+"brr"     : {"nr":12, "init": 0, "wert": 0, "io": GPIO.OUT, "pwm": 0}    # Bremse rechte Kette
+}
+
+# ++++++++++++++++ Dateihandler fuer Logdatei erstellen +++++++++++++++++++
+
+########################################################################
+########################################################################
+########################################################################
+#----------------------Variablendeklaration Ende------------------------
+
+
+
+#---------------------Funktionsdeklarationen Anfang---------------------
+########################################################################
+########################################################################
+########################################################################
+
+def parse(zeile,kanal):
+  """Zerlegt eine Zeile in einzelne Worte und ermittelt,
+  ob die Worte aus einem Kanal und einem dort schreib-
+  oder lesbaren Wert bestehen.
+  """
+  logit('info','Parser gestartet')
+  # hier wird die Zeile aus dem FIFO auseinandergepflueckt
+  wortliste=zeile.split() # Standardworttrenner ist ASCII 32 (Leerzeichen)
+  logit('info','Zeile gesplittet')
+  # macht aus jedem Teil von Zeile am Leerzeichen ein Wort
+  try:
+    # wenn wortliste[0] kein Integer ist, entsteht ein Laufzeitfehler
+    # bei int() muss ich einen Laufzeitfehler sowieso abfangen,
+    # dann kann ich es auch direkt so machen
+    pin=int(wortliste[0])
+    logit('debug','Erstes Wort ist Pinnummer (Integer): '+wortliste[0])
+    pinstr=""
+    for zaehler in kanal.keys():
+      pinstr=zaehler if pin==kanal[zaehler]["nr"] else pinstr
+    logit('debug','angegebener Kanal aus Pinnummer: '+pinstr)
+    # bescheuertes Konstrukt, aber bei einem Dictionary kann ich aus
+    # einem Wert keinen Index ermitteln, also der Umweg ueber die Schleife
+  except:
+    # Der Laufzeitfehler wird hier abgefangen
+    pinstr=wortliste[0]
+    logit('debug','erstes Wort ist '+pinstr)
+  # pinstr kann als Index verwendet werden
+  if (pinstr in kanal.keys()) and (kanal[pinstr]["io"]==GPIO.OUT):
+    # wenn das erste wert in der Kanalliste vorhanden ist und ein beschreibbarer Pin ist
+    pin=kanal[pinstr]["nr"]
+    logit('debug','Kanal '+pinstr+' ist als Output definiert')
+    # weise den Kanal dem Pin zu Kanalliste
+    if pinstr in ["lklpwm","lkrpwm","rklpwm","rkrpwm"]:
+      # wenn re/li-KettePWM
+      try:
+        # wenn wortliste[1] kein float entsteht hier ein Laufzeitfehler
+        wert=float(wortliste[1])
+        logit('debug','zweites Wort ist Float')
+        # muss der Wert ein Float sein
+        if (wert >= 0) and (wert <= 100):
+          logit('debug','Float ist im richtigen Wertebereich')
+          # Float im richtigen Wertebereich
+          # Funktion mit Rueckgabewerten fuettern und raus
+          return pin,wert,1,pinstr
+        else:
+          # sonst Fehler melden und raus
+          logit('error',pinstr + " erwartet Float zwischen 0.0 und 100.0")
+          return -1,0,1,pinstr
+      except:
+        # sonst Laufzeitfehler abfangen
+        # nix tun aber Fehler melden
+        logit('error',pinstr + " erwartet Float")
+        # Fehler in Logdatei schreiben
+        # Funktion mit Rueckgabewerten fuettern und raus
+        return -1,0,1,pinstr
+    else:
+      # alle anderen Kanaele
+      try:
+        # wenn wortliste[1] kein int dann entsteht hier ein Laufzeitfehler
+        wert=int(wortliste[1])
+        logit('debug','zweites Wort ist Integer')
+        # Wert muss Int sein
+        if wert in [0,1]:
+          # wert muss 1 oder null sein
+          # Funktion mit Rueckgabewerten fuettern und raus
+          logit('debug','Integer ist im Wertebereich')
+          return pin,wert,1,pinstr
+        else:  
+          # sonst Fehler melden und raus
+          logit('error',pinstr+" erwartet Int  0 oder 1")
+        # Funktion mit Rueckgabewerten fuettern und raus
+          return 0,-1,1,pinstr
+      except:
+        # Laufzeitfehler abfangen
+        # sonst nix tun aber Fehler melden
+        logit('error',pinstr+" erwartet Int")
+        # In Logdatei schreiben
+        # Funktion mit Rueckgabewerten fuettern und raus
+        return 0,-1,1,pinstr
+  else:
+    # tja, kein beschreibbarer Kanal aus Kanalliste, dann Abbruchbedingung fuer Schleife setzen
+    # in Logdatei schreiben und Funktionswerte zurueckgeben
+    logit('error',"Pin "+pinstr+" ist nicht als Outputkanal nutzbar")
+    return -1,-1,0,pinstr
+
+     ########################################################################
+     ########################################################################
+     ########################################################################
+
+def notausabgeschaltet(kanal):
+  """Prueft, ob Notaus eingeschaltet ist, 
+  und wartet bis es abgeschaltet wird.
+  """
+  logit('info','Notauspruefung zur Initialisierung')
+  while kanal["emoff"]["wert"]==0:
+  # solange Notaus gedrueckt warte bis Notaus entriegelt wird
+    kanal["emoff"]["wert"]= GPIO.input(kanal["emoff"]["nr"])
+    # pruefe Schaltzustand Notaus
+  logit('debug','Notaus abgeschaltet')
+  return kanal["emoff"]["wert"]
+
+     ########################################################################
+     ########################################################################
+     ########################################################################
+
+def initialisiere(kanal):
+  """Initialisiert alle Kanaele mit den Standardwerten"""
+  logit('info','Initialisierung aller Kanaele mit Grundwerten')
+  # ---------------------- Aufruffehler vermeiden, falls bereits initialisiert.
+  GPIO.setwarnings(False)
+  logit('debug','GPIO-Warnungen abschalten')
+  # ---------------------- Namenskonvetion festlegen
+  GPIO.setmode(GPIO.BCM)
+  logit('info','GPIO-Pins auf BCM-Benennung eingestellt')
+  # ---------------------- Initialisieren der Anfangswerte aller Kanaele
+  for zaehler in kanal.keys():
+    GPIO.setup(kanal[zaehler]["nr"],kanal[zaehler]["io"])
+    kanal[zaehler]["wert"]=kanal[zaehler]["init"]
+    if kanal[zaehler]["io"]== GPIO.OUT:
+      GPIO.output(kanal[zaehler]["nr"],kanal[zaehler]["init"])
+
+     ########################################################################
+     ########################################################################
+     ########################################################################
+
+def writeall2log(kanal):
+  """Schreibt alle Werte, mit denen die Kanaele belegt sind in die Logdatei"""
+  for zaehler in kanal.keys():
+    logit('info',"Kanal: %6s(%2d): - Wert: %6.2f - Init: %6.2f - IO: %2d" % (zaehler,kanal[zaehler]["nr"],kanal[zaehler]["wert"],kanal[zaehler]["init"],kanal[zaehler]["io"]))
+
+     ########################################################################
+     ########################################################################
+     ########################################################################
+
+#def videostreamip(partnerip,videoipdatname):
+#  """Schreibe IP zur Videouebertragung in Datei"""
+#  try:
+#    dateiobjekt = open(videoipdatname,"w")
+#    dateiobjekt.write(partnerip)
+#    dateiobjekt.close()
+#    logit('info','Datei mit IP fuer Videostream angelegt')
+#    return 1
+#  except:
+#    logit('error','Datei mit IP fuer Videostream konnte nicht angelegt werden')
+#    return 0
+
+     ########################################################################
+     ########################################################################
+     ########################################################################
+
+def logit(llevel,lmsg):
+  llevel=llevel.upper()
+  if llevel=="DEBUG":
+    logging.debug(lmsg)
+  elif llevel=="ERROR":
+    logging.error(lmsg)
+  else:
+    logging.info(lmsg)
+    
+     ########################################################################
+     ########################################################################
+     ########################################################################
+#---------------------Funktionsdeklarationen Ende---------------------
+
+
+
+
+#------------------------Main Anfang------------------------------------
+########################################################################
+########################################################################
+########################################################################
+
+logit('info','############################ Start ##############################')
+netsocket=socket.socket(socket.AF_INET,socket.SOCK_STREAM)   # erschaffe Netzwerksocket IP/Streaming
+logit('debug','Netzwerksocket erstellt')
+netsocket.bind((listenip,listenport))                        # Binde Netzwerksocket an Netzwerkinterface und Port
+logit('debug','Netzwerksocket an '+listenip+' ' + str(listenport)+' gebunden')
+netsocket.setblocking(True)                                  # Timeout auf unendlich
+logit('debug',' Timeout 0')
+netsocket.listen(1)         # Warte im Netzwerk auf Verbindung
+logit('debug','Variablen initialisiert')
+#logit('debug','Lausche an IP '+listenip)
+#logit('debug','Lausche auf Port '+str(listenport))
+logit('debug','Puffergoesse (Bytes) '+str(listenpuffer))
+#logit('debug','HTML-Port '+htmlport+ ' zur Ausgabe der Logdatei')
+#logit('debug','Video-Port '+str(videoport))
+logit('info','Warte auf Netzwerkverbindung...')
+
+netzwerkverbindung, (partnerip,partnerport) = netsocket.accept() # wenn eine kommt, dann akzeptieren
+logit('info','Verbindung von IP %30s Port %6i' % (partnerip,partnerport))
+
+# weiter = videostreamip(partnerip,videoipdateiname)
+
+initialisiere(kanaldict)
+pwmll = GPIO.PWM(kanaldict["lklpwm"]["nr"], kanaldict["lklpwm"]["pwm"])
+pwmlr = GPIO.PWM(kanaldict["lkrpwm"]["nr"], kanaldict["lkrpwm"]["pwm"])
+pwmrl = GPIO.PWM(kanaldict["rklpwm"]["nr"], kanaldict["rklpwm"]["pwm"])
+pwmrr = GPIO.PWM(kanaldict["rkrpwm"]["nr"], kanaldict["rkrpwm"]["pwm"])
+pwmll.start(0)
+pwmlr.start(0)
+pwmrl.start(0)
+pwmrr.start(0)
+logit('info',"Kanalliste initialisiert und PWMs auf 2500 gesetzt")
+
+# Notaus beim Starten betaetigt, muss bewusst abgeschaltet werden
+# Funktion notausabgeschaltet() wartet so lange bis abgeschaltet ist
+#if weiter:
+#  kanaldict["emoff"]["wert"] = notausabgeschaltet(kanaldict)
+
+writeall2log(kanaldict)
+# Schreibe alle aktuellen werte fuer pins in die Logdatei
+
+
+while weiter and kanaldict["emoff"]["wert"]:
+  # While-Schleife laeuft bis weiter=0=false, Abbruchbedingung ist Rueckgabewert von parse()
+  daten = netzwerkverbindung.recv(listenpuffer)
+  if daten:
+  # wenn Daten aus der Netzwerkverbindung eintrudeln, eine Zeile lesen
+    pin, wert, weiter, pinstr = parse(daten,kanaldict) 
+    # Zeile parsen und Werte fuer pin, wert, weiter und pinstr zurueckbekommen
+    if (pin > 0) and (weiter) and not(wert < 0):
+    # wenn pin, wert und weiter ok sind dann mach weiter 
+    # nicht gut heisst, pin oder wert sind kleiner als 0 oder weiter ist false
+      if pinstr in ["lklpwm","lkrpwm","rklpwm","rkrpwm"]:
+        if pinstr in ["lklpwm","lkrpwm"]:
+          pin2str="lkrpwm" if pinstr=="lklpwm" else "lklpwm"
+          if kanaldict[pin2str]["wert"]==0:
+            pwmll.ChangeDutyCycle(wert) if pinstr=="lklpwm" else pwmlr.ChangeDutyCycle(wert)
+            kanaldict[pinstr]["wert"]=wert
+            logit('info',"schreibe auf %6s(%2d): - DutyCycle: %6.2f" % (pinstr,kanaldict[pinstr]["nr"],kanaldict[pinstr]["wert"]))
+          else:
+            logit('error',"Kann Wert auf %6s(%2d) nicht schreiben da %6s(%2d) nicht 0" % (pinstr,kanaldict[pinstr]["nr"],pin2str,kanaldict[pin2str]["nr"]))
+        else:
+          pin2str="rkrpwm" if pinstr=="rklpwm" else "rklpwm"
+          if kanaldict[pin2str]["wert"]==0:
+            pwmrl.ChangeDutyCycle(wert) if pinstr=="rklpwm" else pwmrr.ChangeDutyCycle(wert)
+            kanaldict[pinstr]["wert"]=wert
+            logit('info',"schreibe auf %6s(%2d): - DutyCycle: %6.2f" % (pinstr,kanaldict[pinstr]["nr"],kanaldict[pinstr]["wert"]))
+          else:
+            logit('error',"Kann wert auf %6s(%2d) nicht schreiben da %6s(%2d) nicht 0" % (pinstr,kanaldict[pinstr]["nr"],pin2str,kanaldict[pin2str]["nr"]))
+      else:
+        # Aktuator 1 li/re
+        if pinstr in ["akt1l","akt1r"]:
+          pin2str="akt1r" if pinstr=="akt1l" else "akt1l"
+        # Aktuator 2 li/re
+        elif pinstr in ["akt2l","akt2r"]:
+          pin2str="akt2r" if pinstr=="akt2l" else "akt2l"
+        # Aktuator 3 li/re
+        elif pinstr in ["akt3l","akt3r"]:
+          pin2str="akt3r" if pinstr=="akt3l" else "akt3l"
+        # Kamera li/re
+        elif pinstr in ["camr","caml"]:
+          pin2str="camr" if pinstr=="caml" else "caml"
+        # hier wird der Wert auf den entsprechenden Pin geschrieben
+        # Lampe und Zusatzfunktionen 1-3 sind damit auch abgegrast :-)
+        if wert and pin2str:
+          GPIO.output(kanaldict[pin2str]["nr"],0)
+          kanaldict[pin2str]["wert"]=0
+          logit('info',"schreibe auf %6s(%2d) - Wert: %6.2f" % (pin2str,kanaldict[pin2str]["nr"],kanaldict[pin2str]["wert"]))
+        if not(schreibschutz):
+          GPIO.output(kanaldict[pinstr]["nr"],wert)
+          kanaldict[pinstr]["wert"]=wert
+          logit('info',"schreibe auf %6s(%2d) - Wert: %6.2f" % (pinstr,kanaldict[pinstr]["nr"],kanaldict[pinstr]["wert"]))
+        else:
+          logit('error',"erst DutyCycle %2spwm auf 0, sonst kann Kanal %6s(%2d) nur auf 0 geaendert werden" % (pinstr[:2],pinstr,kanaldict[pinstr]["nr"]))
+    pin2str=0
+    pinstr=0
+    schreibschutz=0
+    writeall2log(kanaldict)
+    # Schreibe alle aktuellen werte fuer pins in die Logdatei
+
+#    kanaldict["emoff"]["wert"] = GPIO.input(kanaldict["emoff"]["nr"])
+  else:
+    weiter=0
+    logit('error',"Verbindung vom anderen Rechner unterbrochen")
+    
+# letztw Werte in die Logdatei hauen
+# writeall2log(kanaldict)
+
+# Protokolliere Notaus
+if kanaldict["emoff"]["wert"]:
+  logit('info',"Notaus betaetigt")
+
+# komplettes Reset auf Initialwerte
+initialisiere(kanaldict)
+pwmll.stop
+pwmlr.stop
+pwmrl.stop
+pwmrr.stop
+
+# Verabschieden...
+logit('info',"Initialwerte wieder auf die Kanaele geschrieben und PWMs genullt")
+
+GPIO.cleanup()
+logit('info',"Aufraeumen und tschuess")
+logit('info','############################ Ende ###############################')
+netsocket.close()
+########################################################################
+########################################################################
+########################################################################
+#--------------------------Main Ende------------------------------------
