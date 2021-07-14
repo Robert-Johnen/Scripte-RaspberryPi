@@ -8,6 +8,6 @@ Ansteuern über GPIO, Ausgabe einer Log-Datei im Browser sowie eines
 Live-Streams der angeschlossenen Kamera.
 
 - nc_readgpiodata - Python-Script
-  Empfang der Steuerdaten über Netzwerkschnitstelle, Parsen und 
-  Einstellen Komponenten
+  zum Empfang der Steuerdaten über Netzwerkschnitstelle, Parsen und 
+  Einstellen der Komponenten des Panzers
 - 
